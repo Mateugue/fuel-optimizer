@@ -24,7 +24,118 @@ class Station:
     price_updated_at: str = ""
 
 
-def fuel_needed(distance_km, consumption):
+def fuel_needed(distance_km: float, consumption_l_per_100km: float) -> float:
+    return distance_km * consumption_l_per_100km / 100.0
+
+
+def evaluate_stations(
+    stations,
+    vehicle: Vehicle,
+    value_of_time: float,
+    reference_price: float,
+    safety_margin_km: float,
+    minimum_net_saving: float,
+    max_detour_minutes: float,
+):
+    """Evaluate one-stop refueling options.
+
+    The algorithm assumes the vehicle fills the tank at the selected station.
+    The economic comparison is made against a reference station price using
+    the same quantity of fuel that would be purchased at the selected station.
+    """
+    candidates = []
+    rejected = []
+    consumption = vehicle.consumption_l_per_100km
+    safety_l = fuel_needed(safety_margin_km, consumption)
+
+    for s in stations:
+        # 1) Fuel availability
+        if s.availability == "Indisponible":
+            rejected.append((s, "Carburant indisponible"))
+            continue
+
+        # 2) Detour constraint
+        if s.detour_minutes > max_detour_minutes:
+            rejected.append((s, "Détour maximal dépassé"))
+            continue
+
+        # 3) Can the vehicle safely reach the station?
+        needed_to_station = fuel_needed(s.distance_to_station_km, consumption)
+        fuel_remaining_at_station = vehicle.fuel_remaining_l - needed_to_station
+
+        if fuel_remaining_at_station < safety_l:
+            rejected.append(
+                (s, "Marge de sécurité insuffisante pour atteindre la station")
+            )
+            continue
+
+        # 4) Refuel: never buy more than the physical tank capacity.
+        free_space = max(vehicle.tank_capacity_l - fuel_remaining_at_station, 0.0)
+        liters_to_buy = free_space
+        fuel_after_refuel = fuel_remaining_at_station + liters_to_buy
+
+        # 5) Can the vehicle finish the trip with the requested safety margin?
+        fuel_needed_to_destination = fuel_needed(
+            s.station_to_destination_km, consumption
+        )
+        fuel_at_destination = fuel_after_refuel - fuel_needed_to_destination
+
+        if fuel_at_destination < safety_l:
+            rejected.append(
+                (s, "Réservoir insuffisant pour terminer le trajet avec la marge")
+            )
+            continue
+
+        # 6) Two distinct safety indicators.
+        safety_margin_at_station_km = max(
+            (fuel_remaining_at_station - safety_l) / consumption * 100.0,
+            0.0,
+        )
+        safety_margin_at_destination_km = max(
+            (fuel_at_destination - safety_l) / consumption * 100.0,
+            0.0,
+        )
+        arrival_range_km = max(fuel_at_destination / consumption * 100.0, 0.0)
+
+        # 7) Economic calculation.
+        gross_saving = max(reference_price - s.price_per_l, 0.0) * liters_to_buy
+        detour_fuel_cost = fuel_needed(s.detour_km, consumption) * s.price_per_l
+        time_cost = s.detour_minutes / 60.0 * value_of_time
+        net_saving = gross_saving - detour_fuel_cost - time_cost
+
+        if net_saving < minimum_net_saving:
+            rejected.append((s, "Économie nette insuffisante"))
+            continue
+
+        candidates.append(
+            {
+                "station": s,
+                "fuel_needed_to_station": needed_to_station,
+                "fuel_remaining_at_station": fuel_remaining_at_station,
+                "safety_margin_at_station_km": safety_margin_at_station_km,
+                "liters_to_buy": liters_to_buy,
+                "fuel_after_refuel": fuel_after_refuel,
+                "fuel_needed_to_destination": fuel_needed_to_destination,
+                "fuel_at_destination": fuel_at_destination,
+                "arrival_range_km": arrival_range_km,
+                "safety_margin_at_destination_km": safety_margin_at_destination_km,
+                "gross_saving": gross_saving,
+                "detour_fuel_cost": detour_fuel_cost,
+                "time_cost": time_cost,
+                "net_saving": net_saving,
+            }
+        )
+
+    # Highest real net saving first. Tie-breakers favor less detour and lower price.
+    candidates.sort(
+        key=lambda x: (
+            x["net_saving"],
+            -x["station"].detour_minutes,
+            -x["station"].price_per_l,
+        ),
+        reverse=True,
+    )
+    return candidates, rejected
     return distance_km * consumption / 100
 
 
